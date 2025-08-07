@@ -1,24 +1,12 @@
 use binext::BinaryRead;
 use std::{
     fs::File,
-    io::{self, BufWriter, Read},
+    io::{BufWriter, Read},
+    path::Path,
 };
-use streaming_shape_tools::{Chunk, ChunkParser};
+use streaming_shape_tools::{ChunkParser, sss_structs::*};
 
-use streaming_shape_tools::sss_structs::*;
-
-// techinically squish crate provides these, but
-// they're pretty trivial to just write tbh.
-fn bc1_block_count(width: u32, height: u32) -> u32 {
-    return f32::ceil(width as f32 / 4.) as u32 * f32::ceil(height as f32 / 4.) as u32;
-}
-
-fn bc1_byte_size(width: u32, height: u32) -> usize {
-    // the byte size is just the block count * the size of u64.
-    return bc1_block_count(width, height) as usize * 8;
-}
-
-// really stupid. pro tip: don't write code like this!
+// this is really stupid, but it works. The best kind
 fn str_from_c_string(slice: &[u8]) -> Result<&str, std::str::Utf8Error> {
     let frame_name_raw = std::str::from_utf8(&slice[..])?;
     // strip off everything after nul. but if there's no nul
@@ -38,7 +26,7 @@ pub struct SssfData {
 }
 
 /// read a frame chunk and spit out the data
-pub fn read_sssf_frame<T: Read>(mut read: T) -> std::io::Result<SssfData> {
+pub fn read_sssf_frame<T: Read>(mut read: T) -> eyre::Result<SssfData> {
     let mut image_header: Option<SssfFrameChunkHeader> = None;
     let mut image_data: Option<Vec<u8>> = None;
 
@@ -51,9 +39,9 @@ pub fn read_sssf_frame<T: Read>(mut read: T) -> std::io::Result<SssfData> {
                 // Read the data
                 image_data = Some(vec![
                     0;
-                    bc1_byte_size(
-                        hdr_ref.width as u32,
-                        hdr_ref.height as u32
+                    SSSF_FORMAT.compressed_size(
+                        hdr_ref.width as usize,
+                        hdr_ref.height as usize
                     )
                 ]);
                 read.read_exact(&mut image_data.as_mut().unwrap()[..])?;
@@ -83,7 +71,11 @@ pub fn read_sssf_frame<T: Read>(mut read: T) -> std::io::Result<SssfData> {
     }
 }
 
-fn export_frame(basename: &'static str, frame: &SssfData, frame_index: usize) -> eyre::Result<()> {
+fn export_frame<P: AsRef<Path>>(
+    basename: P,
+    frame: &SssfData,
+    frame_index: usize,
+) -> eyre::Result<()> {
     let frame_name = str_from_c_string(&frame.name.name)?;
     let mut frame_buffer: Vec<u8> = vec![0; frame.width as usize * frame.height as usize * 4usize];
 
@@ -95,9 +87,12 @@ fn export_frame(basename: &'static str, frame: &SssfData, frame_index: usize) ->
         &mut frame_buffer[..],
     );
 
-    // TODO: awful. use std::path
-    let path = format!("{basename}/{frame_name}_{frame_index}.png");
-    let file = File::create(&path)?;
+    let mut image_path = basename.as_ref().to_owned();
+    image_path.push(format!("{frame_name}_{frame_index}.png"));
+    let file = File::create(&image_path)?;
+
+    // Truncate any existing file. This isn't *strictly* needed,
+    // but still good practice to do.
     file.set_len(0)?;
 
     let mut bufwriter = BufWriter::new(file);
@@ -112,7 +107,7 @@ fn export_frame(basename: &'static str, frame: &SssfData, frame_index: usize) ->
     )?;
 
     drop(bufwriter);
-    println!("Wrote frame {frame_index} to {path}");
+    println!("Wrote frame {frame_index} to {}", image_path.display());
 
     Ok(())
 }
