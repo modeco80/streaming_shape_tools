@@ -1,8 +1,11 @@
 use binext::BinaryRead;
+use clap::*;
+use eyre::eyre;
 use std::{
     fs::File,
     io::{BufWriter, Read},
-    path::Path,
+    path::{Path, PathBuf},
+    process::exit,
 };
 use streaming_shape_tools::{ChunkParser, sss_structs::*};
 
@@ -113,12 +116,33 @@ fn export_frame<P: AsRef<Path>>(
 }
 
 fn main() -> eyre::Result<()> {
-    let file = File::open("./tests/JMERQUER.SSS")?;
+    let matches = Command::new("extract_sssf")
+        .about(crate_description!())
+        .arg(
+            Arg::new("file")
+                .required(true)
+                .value_parser(value_parser!(PathBuf)),
+        )
+        .get_matches();
+
+    let path = matches.get_one::<PathBuf>("file").unwrap();
+
+    if !path.is_file() {
+        return Err(eyre!("Input file {} is not an actual file", path.display()));
+    }
+
+    let mut output_path = path.parent().unwrap().to_owned();
+    let new_folder_name = format!("{}_extracted", path.file_stem().unwrap().to_str().unwrap());
+    output_path.push(new_folder_name);
+
+    std::fs::create_dir_all(&output_path)?;
+
+    let file = File::open(path)?;
     let mut parser = ChunkParser::new(file);
     let mut frame_index: usize = 0;
     for chunk in &mut parser {
         let data = read_sssf_frame(std::io::Cursor::new(&chunk.data[..]))?;
-        export_frame("tests/tmp", &data, frame_index)?;
+        export_frame(&output_path, &data, frame_index)?;
         frame_index += 1;
     }
 
