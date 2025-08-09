@@ -5,9 +5,12 @@ use std::{
     fs::File,
     io::{BufWriter, Read},
     path::{Path, PathBuf},
-    process::exit,
 };
-use streaming_shape_tools::{ChunkParser, sss_structs::*};
+use streaming_shape_tools::{
+    ChunkParser,
+    manifest::{ManifestFrame, ManifestRoot},
+    sss_structs::*,
+};
 
 // this is really stupid, but it works. The best kind
 fn str_from_c_string(slice: &[u8]) -> Result<&str, std::str::Utf8Error> {
@@ -75,9 +78,10 @@ pub fn read_sssf_frame<T: Read>(mut read: T) -> eyre::Result<SssfData> {
 }
 
 fn export_frame<P: AsRef<Path>>(
-    basename: P,
+    output_path: P,
     frame: &SssfData,
     frame_index: usize,
+    frames: &mut Vec<ManifestFrame>,
 ) -> eyre::Result<()> {
     let frame_name = str_from_c_string(&frame.name.name)?;
     let mut frame_buffer: Vec<u8> = vec![0; frame.width as usize * frame.height as usize * 4usize];
@@ -90,7 +94,7 @@ fn export_frame<P: AsRef<Path>>(
         &mut frame_buffer[..],
     );
 
-    let mut image_path = basename.as_ref().to_owned();
+    let mut image_path = output_path.as_ref().to_owned();
     image_path.push(format!("{frame_name}_{frame_index}.png"));
     let file = File::create(&image_path)?;
 
@@ -108,6 +112,11 @@ fn export_frame<P: AsRef<Path>>(
         image::ColorType::Rgba8,
         image::ImageFormat::Png,
     )?;
+
+    frames.push(ManifestFrame {
+        path: image_path.canonicalize().unwrap().to_str().unwrap().into(),
+        frame_name: Some(frame_name.into()),
+    });
 
     drop(bufwriter);
     println!("Wrote frame {frame_index} to {}", image_path.display());
@@ -135,16 +144,35 @@ fn main() -> eyre::Result<()> {
     let new_folder_name = format!("{}_extracted", path.file_stem().unwrap().to_str().unwrap());
     output_path.push(new_folder_name);
 
+    let output_frame_path = output_path.join("frames");
+    let output_manifest_path = output_path.join("ssf.json");
+
     std::fs::create_dir_all(&output_path)?;
+    std::fs::create_dir_all(&output_frame_path)?;
 
     let file = File::open(path)?;
-    let mut parser = ChunkParser::new(file);
     let mut frame_index: usize = 0;
-    for chunk in &mut parser {
+
+    let mut manifest = ManifestRoot {
+        width: 0,
+        height: 0,
+        frames: Vec::new(),
+    };
+
+    for chunk in ChunkParser::new(file) {
         let data = read_sssf_frame(std::io::Cursor::new(&chunk.data[..]))?;
-        export_frame(&output_path, &data, frame_index)?;
+        if manifest.width == 0 {
+            manifest.width = data.width as u32;
+            manifest.height = data.height as u32;
+        }
+
+        export_frame(&output_frame_path, &data, frame_index, &mut manifest.frames)?;
         frame_index += 1;
     }
+
+    let file = File::create(&output_manifest_path)?;
+    serde_json::to_writer_pretty(file, &manifest)?;
+    println!("manifest written to {}", output_manifest_path.display());
 
     Ok(())
 }
