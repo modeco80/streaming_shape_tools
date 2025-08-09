@@ -3,7 +3,7 @@ use clap::*;
 use eyre::eyre;
 use std::{
     fs::File,
-    io::{BufWriter, Read},
+    io::{BufWriter, Read, Seek},
     path::{Path, PathBuf},
 };
 use streaming_shape_tools::{
@@ -28,42 +28,41 @@ pub struct SssfData {
     pub width: u16,
     pub height: u16,
     pub data: Box<[u8]>,
-    pub name: SssfFullNameChunk,
+    pub name: Option<String>,
 }
 
 /// read a frame chunk and spit out the data
-pub fn read_sssf_frame<T: Read>(mut read: T) -> eyre::Result<SssfData> {
-    let mut image_header: Option<SssfFrameChunkHeader> = None;
-    let mut image_data: Option<Vec<u8>> = None;
+pub fn read_sssf_frame<T: Read + Seek>(mut read: T) -> eyre::Result<SssfData> {
+    let mut frame_header: Option<SssfFrameChunkHeader> = None;
+    let mut frame_name: Option<String> = None;
+    let mut frame_compressed_data: Option<Vec<u8>> = None;
 
+    // FIXME: I'm very not happy with this code.
+    // A newtype chunk iterator like the IFF code (that just spits out chunks + unparsed data,
+    // and expects the client to do the parsing) should be possible to write. But this should work...
+    let mut chunk_header: SssfChunkHeader = read.read_binary::<SssfChunkHeader>()?;
     loop {
-        let chunk_header = read.read_binary::<SssfChunkHeader>()?;
+        let current_pos = read.seek(std::io::SeekFrom::Current(0))? as u32;
+        let next_pos = (current_pos - 4) + chunk_header.next();
+
         match chunk_header.chunk_type {
-            chunk_types::DXT1 | chunk_types::DXT1_ALT => {
-                image_header = Some(read.read_binary::<SssfFrameChunkHeader>()?);
-                let hdr_ref = image_header.as_ref().unwrap();
+            chunk_types::DXT1 => {
+                frame_header = Some(read.read_binary::<SssfFrameChunkHeader>()?);
+                let hdr_ref = frame_header.as_ref().unwrap();
                 // Read the data
-                image_data = Some(vec![
+                frame_compressed_data = Some(vec![
                     0;
                     SSSF_FORMAT.compressed_size(
                         hdr_ref.width as usize,
                         hdr_ref.height as usize
                     )
                 ]);
-                read.read_exact(&mut image_data.as_mut().unwrap()[..])?;
-
-                let _footer_discarded = read.read_binary::<SssfImageChunkFooter>()?;
+                read.read_exact(&mut frame_compressed_data.as_mut().unwrap()[..])?;
             }
 
             chunk_types::FULL_NAME => {
-                // A full name chunk terminates the chunk
-                let hdr = image_header.as_ref().unwrap();
-                return Ok(SssfData {
-                    width: hdr.width,
-                    height: hdr.height,
-                    data: image_data.expect("???").into_boxed_slice(),
-                    name: read.read_binary::<SssfFullNameChunk>()?,
-                });
+                let full_name_chunk = read.read_binary::<SssfFullNameChunk>()?;
+                frame_name = Some(str_from_c_string(&full_name_chunk.name)?.to_string());
             }
 
             // idiot checking
@@ -74,7 +73,25 @@ pub fn read_sssf_frame<T: Read>(mut read: T) -> eyre::Result<SssfData> {
                 );
             }
         }
+
+        // There are no more chunks.
+        if chunk_header.next() == 0 {
+            break;
+        }
+
+        // Seek to and read the next chunk header, so we can parse the data
+        // in the next iteration of this loop.
+        read.seek(std::io::SeekFrom::Start(next_pos as u64))?;
+        chunk_header = read.read_binary::<SssfChunkHeader>()?;
     }
+
+    let hdr = frame_header.as_ref().unwrap();
+    return Ok(SssfData {
+        width: hdr.width,
+        height: hdr.height,
+        data: frame_compressed_data.expect("???").into_boxed_slice(),
+        name: frame_name,
+    });
 }
 
 fn export_frame<P: AsRef<Path>>(
@@ -83,7 +100,10 @@ fn export_frame<P: AsRef<Path>>(
     frame_index: usize,
     frames: &mut Vec<ManifestFrame>,
 ) -> eyre::Result<()> {
-    let frame_name = str_from_c_string(&frame.name.name)?;
+    let frame_name = frame
+        .name
+        .as_ref()
+        .expect("no frame name provided, the code can't currently handle this correctly");
     let mut frame_buffer: Vec<u8> = vec![0; frame.width as usize * frame.height as usize * 4usize];
 
     // Decompress the DXT1 compressed data

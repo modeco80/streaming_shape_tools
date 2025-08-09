@@ -98,7 +98,9 @@ impl ChunkWriter {
     pub fn append_chunk(&mut self, chunk: Chunk) -> std::io::Result<()> {
         let chunk_header = ChunkHeader {
             ckid: chunk.fcc,
-            size: chunk.data.len() as u32,
+            // For the IFF variant we're using (as mentioned before, EAC/REAL STREAM_ functions),
+            // it assumes the chunk length includes the IFF chunk header's size inside of it.
+            size: (chunk.data.len() + CHUNK_HEADER_SIZE) as u32,
         };
 
         // SAFETY: This doesn't allow reading beyond the chunk header.

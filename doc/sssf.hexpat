@@ -14,8 +14,8 @@ fn get_dxt1_length(u32 width, u32 height) {
 };
 
 struct sss_shape_chunk {
-    u16 next;
-    u16 type;
+    u8 type;
+    u24 next;
 };
 
 // most of these "unk"s are probably padding.
@@ -36,16 +36,16 @@ struct sss_image_chunk {
     u16 unk9;
     u16 unka;
     u16 unkb;
+    u16 unkc;
 };
 
 struct sss_fullname_chunk {
-    u16 unk;
     char name[0xc];
 };
 
 struct sss_chunk_dispatch {
     sss_shape_chunk c;
-    if(c.type == 0x10 || c.type == 0x20) {
+    if(c.type == 0x60) {
         sss_image_chunk image;
     } else if(c.type == 0x70) {
         sss_fullname_chunk name;
